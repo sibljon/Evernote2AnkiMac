@@ -27,6 +27,15 @@ TITLE_FIELD_NAME = 'title'
 CONTENT_FIELD_NAME = 'content'
 GUID_FIELD_NAME = 'Evernote GUID'
 
+USE_APPLESCRIPT = False
+import platform
+if platform.system() == "Darwin":
+    import sys
+    sys.path.append("" + os.path.dirname(os.path.realpath(__file__)) + "/PyObjC")
+    import applescript
+    if applescript.AppleScript('name of application "Evernote"').run() == "Evernote":
+        USE_APPLESCRIPT = {}
+
 SETTING_UPDATE_EXISTING_NOTES = 'evernoteUpdateExistingNotes'
 SETTING_TOKEN = 'evernoteToken'
 SETTING_KEEP_TAGS = 'evernoteKeepTags'
@@ -179,28 +188,33 @@ class EvernoteCard:
 
 class Evernote:
     def __init__(self):
-        if not mw.col.conf.get(SETTING_TOKEN, False):
-            # First run of the Plugin we did not save the access key yet
-            client = EvernoteClient(
-                consumer_key='scriptkiddi-2682',
-                consumer_secret='965f1873e4df583c',
-                sandbox=False
-            )
-            request_token = client.get_request_token('https://fap-studios.de/anknotes/index.html')
-            url = client.get_authorize_url(request_token)
-            showInfo("We will open a Evernote Tab in your browser so you can allow access to your account")
-            openLink(url)
-            oauth_verifier = getText(prompt="Please copy the code that showed up, after allowing access, in here")[0]
-            auth_token = client.get_access_token(
-                request_token.get('oauth_token'),
-                request_token.get('oauth_token_secret'),
-                oauth_verifier)
-            mw.col.conf[SETTING_TOKEN] = auth_token
-        else:
-            auth_token = mw.col.conf.get(SETTING_TOKEN, False)
-        self.token = auth_token
-        self.client = EvernoteClient(token=auth_token, sandbox=False)
-        self.noteStore = self.client.get_note_store()
+
+        if USE_APPLESCRIPT is False:
+
+            if not mw.col.conf.get(SETTING_TOKEN, False):
+                # First run of the Plugin we did not save the access key yet
+                client = EvernoteClient(
+                    consumer_key='scriptkiddi-2682',
+                    consumer_secret='965f1873e4df583c',
+                    sandbox=False
+                )
+                request_token = client.get_request_token('https://fap-studios.de/anknotes/index.html')
+                url = client.get_authorize_url(request_token)
+                showInfo("We will open a Evernote Tab in your browser so you can allow access to your account")
+                openLink(url)
+                oauth_verifier = getText(prompt="Please copy the code that showed up, after allowing access, in here")[0]
+                auth_token = client.get_access_token(
+                    request_token.get('oauth_token'),
+                    request_token.get('oauth_token_secret'),
+                    oauth_verifier)
+                mw.col.conf[SETTING_TOKEN] = auth_token
+            else:
+                auth_token = mw.col.conf.get(SETTING_TOKEN, False)
+
+            self.token = auth_token
+            self.client = EvernoteClient(token=auth_token, sandbox=False)
+            self.noteStore = self.client.get_note_store()
+
 
     def find_tag_guid(self, tag):
         list_tags = self.noteStore.listTags()
@@ -231,19 +245,26 @@ class Evernote:
         return guids
 
     def get_note_information(self, note_guid):
-        tags = []
-        try:
-            whole_note = self.noteStore.getNote(self.token, note_guid, True, True, False, False)
+        if USE_APPLESCRIPT is not False:
+            whole_note = next((l for l in USE_APPLESCRIPT['notes'] if l['guid'] == note_guid), None)
             if mw.col.conf.get(SETTING_KEEP_TAGS, False):
-                tags = self.noteStore.getNoteTagNames(self.token, note_guid)
-        except EDAMSystemException, e:
-            if e.errorCode == EDAMErrorCode.RATE_LIMIT_REACHED:
-                m, s = divmod(e.rateLimitDuration, 60)
-                showInfo("Rate limit has been reached. We will save the notes downloaded thus far.\r\n"
-                         "Please retry your request in {} min".format("%d:%02d" % (m, s)))
-                return None
-            raise
-        return whole_note.title, whole_note.content, tags
+                tags = whole_note['tags']
+            #raise NameError(whole_note)
+        else:
+            tags = []
+            try:
+                whole_note = self.noteStore.getNote(self.token, note_guid, True, True, False, False)
+                if mw.col.conf.get(SETTING_KEEP_TAGS, False):
+                    tags = self.noteStore.getNoteTagNames(self.token, note_guid)
+            except EDAMSystemException, e:
+                if e.errorCode == EDAMErrorCode.RATE_LIMIT_REACHED:
+                    m, s = divmod(e.rateLimitDuration, 60)
+                    showInfo("Rate limit has been reached. We will save the notes downloaded thus far.\r\n"
+                             "Please retry your request in {} min".format("%d:%02d" % (m, s)))
+                    return None
+                raise
+        
+        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags
 
 
 class Controller:
@@ -260,7 +281,35 @@ class Controller:
     def proceed(self):
         anki_ids = self.anki.get_cards_id_from_tag(self.ankiTag)
         anki_guids = self.anki.get_guids_from_anki_id(anki_ids)
-        evernote_guids = self.get_evernote_guids_from_tag(self.evernoteTags)
+
+        if USE_APPLESCRIPT is not False:
+            USE_APPLESCRIPT['notes'] = applescript.AppleScript('''
+                on run {arg1}
+                    tell application "Evernote"
+                        set myNotes to find notes "tag:" & arg1
+                        set noteList to {}
+                        
+                        repeat with counter_variable_name from 1 to count of myNotes
+                            set current_note to item counter_variable_name of myNotes
+                            
+                            set currentTags to tags of current_note
+                            set tagList to {}
+                            
+                            repeat with tag_counter from 1 to count of currentTags
+                                set end of tagList to name of item tag_counter of currentTags
+                            end repeat
+                            
+                            set end of noteList to {|title|:title of current_note, |guid|:guid of current_note, |content|:HTML content of current_note, |tags|:tagList}
+                        end repeat
+                        noteList
+                    end tell
+                end run
+            ''').run(mw.col.conf.get(SETTING_TAGS_TO_IMPORT, ""))
+            evernote_guids = [d['guid'] for d in USE_APPLESCRIPT['notes']]
+
+        else:
+            evernote_guids = self.get_evernote_guids_from_tag(self.evernoteTags)
+
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
         self.anki.start_editing()
