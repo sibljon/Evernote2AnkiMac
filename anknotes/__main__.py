@@ -285,25 +285,52 @@ class Controller:
         if USE_APPLESCRIPT is not False:
             USE_APPLESCRIPT['notes'] = applescript.AppleScript('''
                 on run {arg1}
-                    tell application "Evernote"
-                        set myNotes to find notes "tag:" & arg1
-                        set noteList to {}
-                        
-                        repeat with counter_variable_name from 1 to count of myNotes
-                            set current_note to item counter_variable_name of myNotes
-                            
-                            set currentTags to tags of current_note
-                            set tagList to {}
-                            
-                            repeat with tag_counter from 1 to count of currentTags
-                                set end of tagList to name of item tag_counter of currentTags
-                            end repeat
-                            
-                            set end of noteList to {|title|:title of current_note, |guid|:guid of current_note, |content|:HTML content of current_note, |tags|:tagList}
-                        end repeat
-                        noteList
+                tell application "Evernote"
+                    set myNotes to find notes "tag:" & arg1
+                    set noteList to {}
+                    
+                    set currentTime to do shell script "date '+%Y%m%d%H%M%S'"
+                    tell application "Finder"
+                        try
+                            make new folder at (path to temporary items as string) with properties {name:currentTime}
+                        end try
                     end tell
+                    
+                    repeat with counter_variable_name from 1 to count of myNotes
+                        set current_note to item counter_variable_name of myNotes
+                        
+                        set currentTags to tags of current_note
+                        set currentGUID to guid of current_note as string
+                        set tagList to {}
+                        
+                        repeat with tag_counter from 1 to count of currentTags
+                            set end of tagList to name of item tag_counter of currentTags
+                        end repeat
+                        
+                        set currentAttachments to attachments of current_note
+                        set attachmentList to {}
+                        repeat with counter from 1 to count of currentAttachments
+                            set current_attachment to item counter of currentAttachments
+                            
+                            tell application "Finder"
+                                try
+                                    make new folder at (path to temporary items as string) & currentTime with properties {name:currentGUID}
+                                end try
+                            end tell
+                            
+                            set current_filename to ((path to temporary items as string) & currentTime & ":" & currentGUID & ":" & (filename of current_attachment))
+                            
+                            write current_attachment to current_filename
+                            
+                            set end of attachmentList to {|hash|:hash of current_attachment, path:POSIX path of current_filename}
+                        end repeat
+                        
+                        set end of noteList to {|title|:title of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+                    end repeat
+                    noteList
+                end tell
                 end run
+
             ''').run(mw.col.conf.get(SETTING_TAGS_TO_IMPORT, ""))
             evernote_guids = [d['guid'] for d in USE_APPLESCRIPT['notes']]
 
