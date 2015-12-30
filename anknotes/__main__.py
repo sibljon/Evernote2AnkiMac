@@ -12,9 +12,10 @@ from anki.hooks import wrap
 from aqt.preferences import Preferences
 from aqt.utils import showInfo, getText, openLink, getOnlyText
 from aqt.qt import QLineEdit, QLabel, QVBoxLayout, QGroupBox, SIGNAL, QCheckBox, QComboBox, QSpacerItem, QSizePolicy, QWidget
-from aqt import mw
+from aqt import mw, editor
 # from pprint import pprint
 
+import re
 
 # Note: This class was adapted from the Real-Time_Import_for_use_with_the_Rikaisama_Firefox_Extension plug-in
 # by cb4960@gmail.com
@@ -31,6 +32,7 @@ USE_APPLESCRIPT = False
 import platform
 if platform.system() == "Darwin":
     import sys
+    # add PyObjC to system path so it may be automatically included by py-applescript
     sys.path.append("" + os.path.dirname(os.path.realpath(__file__)) + "/PyObjC")
     import applescript
     if applescript.AppleScript('name of application "Evernote"').run() == "Evernote":
@@ -59,7 +61,7 @@ class Anki:
                                GUID_FIELD_NAME: card.guid}
             card.tags.append(tag)
             if update:
-                self.update_note(anki_field_info, card.tags)
+                self.update_note(anki_field_info, card.tags, card.attachments)
             else:
                 self.add_note(deck, model_name, anki_field_info, card.tags)
             count += 1
@@ -73,7 +75,7 @@ class Anki:
         col.remCards(card_ids)
         return len(card_ids)
 
-    def update_note(self, fields, tags=list()):
+    def update_note(self, fields, tags=list(), attachments=None):
         col = self.collection()
         note_id = col.findNotes(fields[GUID_FIELD_NAME])[0]
         note = anki.notes.Note(col, None, note_id)
@@ -82,7 +84,7 @@ class Anki:
             if TITLE_FIELD_NAME in fld.get('name'):
                 note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
             elif CONTENT_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = fields[CONTENT_FIELD_NAME]
+                note.fields[fld.get('ord')] = self.parse_evernote_media_tags(fields[CONTENT_FIELD_NAME], attachments)
             # we dont have to update the evernote guid because if it changes we wont find this note anyway
         note.flush()
         return note.id
@@ -104,6 +106,7 @@ class Anki:
         note.model()['did'] = id_deck
         note.tags = tags
         for name, value in fields.items():
+            # TODO if field=content -> do the media magic
             note[name] = value
         return note
 
@@ -154,6 +157,34 @@ class Anki:
         ids = self.collection().findCards(query)
         return ids
 
+    # TODO import file to anki media library
+    def import_file(self, filename):
+        return aqt.mw.col.media.addFile(filename)
+
+    # TODO parse evernote <embed> tags
+    def parse_evernote_media_tags(self, content, attachments):
+
+        # images
+        pattern = re.compile(r'(<img.+?src=")\?hash=(.*?)(".+?class="en-media".*?\/>)')
+        for match in pattern.finditer(content):
+            filename = next((l['filename'] for l in attachments if l['hash'] == match.group(2)), None)
+            if filename:
+                importedname = self.import_file(filename)
+                # same regexp as above except that we use the specific hash to substitute with importedname
+                content = re.sub(r'(<img.+?src=")\?hash=(' + match.group(2) + r')(".+?class="en-media".*?\/>)', r'\1'+importedname+r'\3', content)
+
+        # TODO pdfs
+        pattern = re.compile(r'(<embed.+?src=")\?hash=(.*?)(".+?type="evernote\/x-pdf".*?>.*?<\/embed>)')
+        for match in pattern.finditer(content):
+            filename = next((l['filename'] for l in attachments if l['hash'] == match.group(2)), None)
+            if filename:
+                importedname = self.import_file(filename)
+                # same regexp as above except that we use the specific hash to substitute with importedname
+                content = re.sub(r'(<embed.+?src=")\?hash=(' + match.group(2) + r')(".+?type="evernote\/x-pdf".*?>.*?<\/embed>)', r'\1'+importedname+r'\3', content)
+
+        #raise NameError(self, log)
+        return content
+
     def start_editing(self):
         self.window().requireReset()
 
@@ -178,12 +209,14 @@ class EvernoteCard:
     front = ""
     back = ""
     guid = ""
+    attachments = []
 
-    def __init__(self, q, a, g, tags):
+    def __init__(self, q, a, g, tags, attachments):
         self.front = q
         self.back = a
         self.guid = g
         self.tags = tags
+        self.attachments = attachments
 
 
 class Evernote:
@@ -228,8 +261,8 @@ class Evernote:
             note_info = self.get_note_information(guid)
             if note_info is None:
                 return cards
-            title, content, tags = note_info
-            cards.append(EvernoteCard(title, content, guid, tags))
+            title, content, tags, attachments = note_info
+            cards.append(EvernoteCard(title, content, guid, tags, attachments))
         return cards
 
     def find_notes_filter_by_tag_guids(self, guids_list):
@@ -253,6 +286,7 @@ class Evernote:
         else:
             tags = []
             try:
+                # TODO attachments evernote api
                 whole_note = self.noteStore.getNote(self.token, note_guid, True, True, False, False)
                 if mw.col.conf.get(SETTING_KEEP_TAGS, False):
                     tags = self.noteStore.getNoteTagNames(self.token, note_guid)
@@ -264,7 +298,7 @@ class Evernote:
                     return None
                 raise
         
-        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags
+        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments']
 
 
 class Controller:
@@ -282,6 +316,7 @@ class Controller:
         anki_ids = self.anki.get_cards_id_from_tag(self.ankiTag)
         anki_guids = self.anki.get_guids_from_anki_id(anki_ids)
 
+        # get all Evernote notes
         if USE_APPLESCRIPT is not False:
             USE_APPLESCRIPT['notes'] = applescript.AppleScript('''
                 on run {arg1}
@@ -322,10 +357,10 @@ class Controller:
                             
                             write current_attachment to current_filename
                             
-                            set end of attachmentList to {|hash|:hash of current_attachment, path:POSIX path of current_filename}
+                            set end of attachmentList to {|hash|:hash of current_attachment, |filename|:POSIX path of current_filename}
                         end repeat
                         
-                        set end of noteList to {|title|:title of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
                     end repeat
                     noteList
                 end tell
