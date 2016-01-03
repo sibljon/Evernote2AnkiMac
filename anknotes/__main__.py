@@ -16,6 +16,8 @@ from aqt import mw, editor
 # from pprint import pprint
 
 import re
+from BeautifulSoup import BeautifulSoup, Tag
+
 
 # Note: This class was adapted from the Real-Time_Import_for_use_with_the_Rikaisama_Firefox_Extension plug-in
 # by cb4960@gmail.com
@@ -163,27 +165,48 @@ class Anki:
 
     # TODO parse evernote <embed> tags
     def parse_evernote_media_tags(self, content, attachments):
+        #raise NameError(self, content)
 
-        # images
-        pattern = re.compile(r'(<img.+?src=")\?hash=(.*?)(".+?class="en-media".*?\/>)')
-        for match in pattern.finditer(content):
-            filename = next((l['filename'] for l in attachments if l['hash'] == match.group(2)), None)
-            if filename:
-                importedname = self.import_file(filename)
-                # same regexp as above except that we use the specific hash to substitute with importedname
-                content = re.sub(r'(<img.+?src=")\?hash=(' + match.group(2) + r')(".+?class="en-media".*?\/>)', r'\1'+importedname+r'\3', content)
+        soup = BeautifulSoup(content)
+        pattern = re.compile(r'<.*?src="\?hash=(\w+?)".*?>')
+
+        # TODO images
+        for match in soup.findAll('img'):
+            #raise NameError(self,str(match))
+
+            filehashmatch = pattern.search(str(match))
+            if filehashmatch:
+                filehash = filehashmatch.group(1)
+                filename = next((l['filename'] for l in attachments if l['hash'] == filehash), None)
+
+                if filename is not None:
+                    importedname = self.import_file(filename)
+                    match.replaceWith(Tag(soup, 'img', [('src', importedname)]))
+
 
         # TODO pdfs
-        pattern = re.compile(r'(<embed.+?src=")\?hash=(.*?)(".+?type="evernote\/x-pdf".*?>.*?<\/embed>)')
-        for match in pattern.finditer(content):
-            filename = next((l['filename'] for l in attachments if l['hash'] == match.group(2)), None)
-            if filename:
-                importedname = self.import_file(filename)
-                # same regexp as above except that we use the specific hash to substitute with importedname
-                content = re.sub(r'(<embed.+?src=")\?hash=(' + match.group(2) + r')(".+?type="evernote\/x-pdf".*?>.*?<\/embed>)', r'\1'+importedname+r'\3', content)
+        for match in soup.findAll('embed', {"type": "evernote/x-pdf"}):
 
-        #raise NameError(self, log)
-        return content
+            filehashmatch = pattern.search(str(match))
+            if filehashmatch:
+                filehash = filehashmatch.group(1)
+                filename = next((l['filename'] for l in attachments if l['hash'] == filehash), None)
+
+                if filename is not None:
+                    # convert pdf -> jpg
+                    images = pdf2jpg(filename)
+
+                    # import each jpg
+                    imageTags = Tag(soup, "span")
+                    for image in images:
+                        importedname = self.import_file(image)
+                        # add new image tag
+                        imageTags.insert(images.index(image), Tag(soup, 'img', [('src', importedname)]))
+
+                    # replace embed with <img src...> for each image
+                    match.replaceWith(imageTags)
+
+        return str(soup).decode('utf-8')
 
     def start_editing(self):
         self.window().requireReset()
@@ -353,7 +376,7 @@ class Controller:
                                 end try
                             end tell
                             
-                            set current_filename to ((path to temporary items as string) & currentTime & ":" & currentGUID & ":" & (filename of current_attachment))
+                            set current_filename to ((path to temporary items as string) & currentTime & ":" & currentGUID & ":" & (hash of current_attachment))
                             
                             write current_attachment to current_filename
                             
@@ -502,3 +525,45 @@ def update_evernote_update_existing_notes(index):
     mw.col.conf[SETTING_UPDATE_EXISTING_NOTES] = index
 
 Preferences.setupOptions = wrap(Preferences.setupOptions, setup_evernote)
+
+
+
+import sys
+import os
+from os.path import splitext
+from objc import YES, NO
+from Foundation import NSData
+from AppKit import *
+
+NSApp = NSApplication.sharedApplication()
+
+def pdf2jpg(pdfpath, resolution=72):
+    """I am converting all pages of a PDF file to JPG images."""
+    
+    jpgList = []
+
+    pdfdata = NSData.dataWithContentsOfFile_(pdfpath)
+    pdfrep = NSPDFImageRep.imageRepWithData_(pdfdata)
+    pagecount = pdfrep.pageCount()
+    for i in range(0, pagecount):
+        pdfrep.setCurrentPage_(i)
+        pdfimage = NSImage.alloc().init()
+        pdfimage.addRepresentation_(pdfrep)
+        origsize = pdfimage.size()
+        width, height = origsize
+        pdfimage.setScalesWhenResized_(YES)
+        rf = resolution / 72.0
+        pdfimage.setSize_((width*rf, height*rf))
+        tiffimg = pdfimage.TIFFRepresentation()
+        bmpimg = NSBitmapImageRep.imageRepWithData_(tiffimg)
+        data = bmpimg.representationUsingType_properties_(NSJPEGFileType, {NSImageCompressionFactor: 1.0})
+        jpgpath = "%s-%d.jpg" % (splitext(pdfpath)[0], i)
+
+        jpgList.append(jpgpath)
+        
+        if not os.path.exists(jpgpath):
+            data.writeToFile_atomically_(jpgpath, False)
+
+    return jpgList
+
+
