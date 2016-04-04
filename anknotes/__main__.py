@@ -1,4 +1,6 @@
-import os
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import os, sys, subprocess
 
 # from thrift.Thrift import *
 from evernote.edam.notestore.ttypes import NoteFilter, NotesMetadataResultSpec
@@ -12,8 +14,18 @@ from anki.hooks import wrap
 from aqt.preferences import Preferences
 from aqt.utils import showInfo, getText, openLink, getOnlyText
 from aqt.qt import QLineEdit, QLabel, QVBoxLayout, QGroupBox, SIGNAL, QCheckBox, QComboBox, QSpacerItem, QSizePolicy, QWidget
-from aqt import mw
+from aqt import mw, editor
 # from pprint import pprint
+
+import re
+from BeautifulSoup import BeautifulSoup, Tag
+
+
+# debugging memory leak; its very ressource-intensive and will slow down the script heavily!
+#sys.path.append("" + os.path.dirname(os.path.realpath(__file__)))
+#from pympler.tracker import SummaryTracker
+#tracker = SummaryTracker()
+# use this in code: tracker.print_diff()
 
 
 # Note: This class was adapted from the Real-Time_Import_for_use_with_the_Rikaisama_Firefox_Extension plug-in
@@ -30,7 +42,7 @@ GUID_FIELD_NAME = 'Evernote GUID'
 USE_APPLESCRIPT = False
 import platform
 if platform.system() == "Darwin":
-    import sys
+    # add PyObjC to system path so it may be automatically included by py-applescript
     sys.path.append("" + os.path.dirname(os.path.realpath(__file__)) + "/PyObjC")
     import applescript
     if applescript.AppleScript('name of application "Evernote"').run() == "Evernote":
@@ -59,7 +71,7 @@ class Anki:
                                GUID_FIELD_NAME: card.guid}
             card.tags.append(tag)
             if update:
-                self.update_note(anki_field_info, card.tags)
+                self.update_note(anki_field_info, card.tags, card.attachments)
             else:
                 self.add_note(deck, model_name, anki_field_info, card.tags)
             count += 1
@@ -73,7 +85,7 @@ class Anki:
         col.remCards(card_ids)
         return len(card_ids)
 
-    def update_note(self, fields, tags=list()):
+    def update_note(self, fields, tags=list(), attachments=None):
         col = self.collection()
         note_id = col.findNotes(fields[GUID_FIELD_NAME])[0]
         note = anki.notes.Note(col, None, note_id)
@@ -82,7 +94,7 @@ class Anki:
             if TITLE_FIELD_NAME in fld.get('name'):
                 note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
             elif CONTENT_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = fields[CONTENT_FIELD_NAME]
+                note.fields[fld.get('ord')] = self.parse_evernote_media_tags(fields[CONTENT_FIELD_NAME], attachments)
             # we dont have to update the evernote guid because if it changes we wont find this note anyway
         note.flush()
         return note.id
@@ -104,6 +116,7 @@ class Anki:
         note.model()['did'] = id_deck
         note.tags = tags
         for name, value in fields.items():
+            # TODO if field=content -> do the media magic
             note[name] = value
         return note
 
@@ -154,6 +167,55 @@ class Anki:
         ids = self.collection().findCards(query)
         return ids
 
+    # TODO import file to anki media library
+    def import_file(self, filename):
+        return aqt.mw.col.media.addFile(filename)
+
+    # TODO parse evernote <embed> tags
+    def parse_evernote_media_tags(self, content, attachments):
+        #raise NameError(self, content)
+
+        soup = BeautifulSoup(content)
+        pattern = re.compile(r'<.*?src="\?hash=(\w+?)".*?>')
+
+        # TODO images
+        for match in soup.findAll('img'):
+            #raise NameError(self,str(match))
+
+            filehashmatch = pattern.search(str(match))
+            if filehashmatch:
+                filehash = filehashmatch.group(1)
+                filename = next((l['filename'] for l in attachments if l['hash'] == filehash), None)
+
+                if filename is not None:
+                    importedname = self.import_file(filename)
+                    match.replaceWith(Tag(soup, 'img', [('src', importedname)]))
+
+
+        # TODO pdfs
+        for match in soup.findAll('embed', {"type": "evernote/x-pdf"}):
+
+            filehashmatch = pattern.search(str(match))
+            if filehashmatch:
+                filehash = filehashmatch.group(1)
+                filename = next((l['filename'] for l in attachments if l['hash'] == filehash), None)
+
+                if filename is not None:
+                    # convert pdf -> image
+                    images = pdf2image(filename)
+
+                    # import each jpg
+                    imageTags = Tag(soup, "span")
+                    for image in images:
+                        importedname = self.import_file(image)
+                        # add new image tag
+                        imageTags.insert(images.index(image), Tag(soup, 'img', [('src', importedname)]))
+
+                    # replace embed with <img src...> for each image
+                    match.replaceWith(imageTags)
+
+        return str(soup).decode('utf-8')
+
     def start_editing(self):
         self.window().requireReset()
 
@@ -178,12 +240,14 @@ class EvernoteCard:
     front = ""
     back = ""
     guid = ""
+    attachments = []
 
-    def __init__(self, q, a, g, tags):
+    def __init__(self, q, a, g, tags, attachments):
         self.front = q
         self.back = a
         self.guid = g
         self.tags = tags
+        self.attachments = attachments
 
 
 class Evernote:
@@ -228,8 +292,8 @@ class Evernote:
             note_info = self.get_note_information(guid)
             if note_info is None:
                 return cards
-            title, content, tags = note_info
-            cards.append(EvernoteCard(title, content, guid, tags))
+            title, content, tags, attachments = note_info
+            cards.append(EvernoteCard(title, content, guid, tags, attachments))
         return cards
 
     def find_notes_filter_by_tag_guids(self, guids_list):
@@ -253,6 +317,7 @@ class Evernote:
         else:
             tags = []
             try:
+                # TODO attachments evernote api
                 whole_note = self.noteStore.getNote(self.token, note_guid, True, True, False, False)
                 if mw.col.conf.get(SETTING_KEEP_TAGS, False):
                     tags = self.noteStore.getNoteTagNames(self.token, note_guid)
@@ -264,7 +329,7 @@ class Evernote:
                     return None
                 raise
         
-        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags
+        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments']
 
 
 class Controller:
@@ -279,31 +344,60 @@ class Controller:
         self.evernote = Evernote()
 
     def proceed(self):
+
         anki_ids = self.anki.get_cards_id_from_tag(self.ankiTag)
         anki_guids = self.anki.get_guids_from_anki_id(anki_ids)
 
+        # get all Evernote notes
         if USE_APPLESCRIPT is not False:
             USE_APPLESCRIPT['notes'] = applescript.AppleScript('''
                 on run {arg1}
-                    tell application "Evernote"
-                        set myNotes to find notes "tag:" & arg1
-                        set noteList to {}
-                        
-                        repeat with counter_variable_name from 1 to count of myNotes
-                            set current_note to item counter_variable_name of myNotes
-                            
-                            set currentTags to tags of current_note
-                            set tagList to {}
-                            
-                            repeat with tag_counter from 1 to count of currentTags
-                                set end of tagList to name of item tag_counter of currentTags
-                            end repeat
-                            
-                            set end of noteList to {|title|:title of current_note, |guid|:guid of current_note, |content|:HTML content of current_note, |tags|:tagList}
-                        end repeat
-                        noteList
+                tell application "Evernote"
+                    set myNotes to find notes "tag:" & arg1
+                    set noteList to {}
+                    
+                    set currentTime to do shell script "date '+%Y%m%d%H%M%S'"
+                    tell application "Finder"
+                        try
+                            make new folder at (path to temporary items as string) with properties {name:currentTime}
+                        end try
                     end tell
+                    
+                    repeat with counter_variable_name from 1 to count of myNotes
+                        set current_note to item counter_variable_name of myNotes
+                        
+                        set currentTags to tags of current_note
+                        set currentGUID to guid of current_note as string
+                        set tagList to {}
+                        
+                        repeat with tag_counter from 1 to count of currentTags
+                            set end of tagList to name of item tag_counter of currentTags
+                        end repeat
+                        
+                        set currentAttachments to attachments of current_note
+                        set attachmentList to {}
+                        repeat with counter from 1 to count of currentAttachments
+                            set current_attachment to item counter of currentAttachments
+                            
+                            tell application "Finder"
+                                try
+                                    make new folder at (path to temporary items as string) & currentTime with properties {name:currentGUID}
+                                end try
+                            end tell
+                            
+                            set current_filename to ((path to temporary items as string) & currentTime & ":" & currentGUID & ":" & (hash of current_attachment))
+                            
+                            write current_attachment to current_filename
+                            
+                            set end of attachmentList to {|hash|:hash of current_attachment, |filename|:POSIX path of current_filename}
+                        end repeat
+                        
+                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+                    end repeat
+                    noteList
+                end tell
                 end run
+
             ''').run(mw.col.conf.get(SETTING_TAGS_TO_IMPORT, ""))
             evernote_guids = [d['guid'] for d in USE_APPLESCRIPT['notes']]
 
@@ -312,6 +406,10 @@ class Controller:
 
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
+
+        # TODO: funktioniert das so? + loeschfunktion implementieren
+        cards_to_delete = set(anki_guids) - set(evernote_guids)
+        
         self.anki.start_editing()
         n = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
         if self.updateExistingNotes is UpdateExistingNotes.IgnoreExistingNotes:
@@ -440,3 +538,25 @@ def update_evernote_update_existing_notes(index):
     mw.col.conf[SETTING_UPDATE_EXISTING_NOTES] = index
 
 Preferences.setupOptions = wrap(Preferences.setupOptions, setup_evernote)
+
+
+
+
+# ImageMagick is a requirement, convert needs to be in the path!
+# we use envoy to better handle the output (which for whatever reason is actually output to std_err)
+import envoy
+
+def pdf2image(pdfpath, resolution=72):
+    #sys.stderr.write(pdfpath+"\n")
+    r = envoy.run(str('convert pdf:' +pdfpath+ ' -verbose -density 200 ' +pdfpath+ '.png'))
+    #sys.stderr.write("envoy: "+r.std_err+"\n"+r.std_out+"\n"+"convert pdf:"+pdfpath+" -verbose -density 200 "+ pdfpath+".png"+"\nEND envoy")
+    # for whatever reason, convert outputs it as error -> std_err
+    num = re.findall(pdfpath+'-[0-9]+.png', r.std_err)
+    if len(num) is 0:
+        return [(pdfpath+".png").decode('UTF-8')]
+    else:
+        return [i.decode('UTF-8') for i in num]
+
+
+
+
