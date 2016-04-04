@@ -1,4 +1,6 @@
-import os
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import os, sys, subprocess
 
 # from thrift.Thrift import *
 from evernote.edam.notestore.ttypes import NoteFilter, NotesMetadataResultSpec
@@ -19,6 +21,13 @@ import re
 from BeautifulSoup import BeautifulSoup, Tag
 
 
+# debugging memory leak; its very ressource-intensive and will slow down the script heavily!
+#sys.path.append("" + os.path.dirname(os.path.realpath(__file__)))
+#from pympler.tracker import SummaryTracker
+#tracker = SummaryTracker()
+# use this in code: tracker.print_diff()
+
+
 # Note: This class was adapted from the Real-Time_Import_for_use_with_the_Rikaisama_Firefox_Extension plug-in
 # by cb4960@gmail.com
 # .. itself adapted from Yomichan plugin by Alex Yatskov.
@@ -33,7 +42,6 @@ GUID_FIELD_NAME = 'Evernote GUID'
 USE_APPLESCRIPT = False
 import platform
 if platform.system() == "Darwin":
-    import sys
     # add PyObjC to system path so it may be automatically included by py-applescript
     sys.path.append("" + os.path.dirname(os.path.realpath(__file__)) + "/PyObjC")
     import applescript
@@ -193,8 +201,8 @@ class Anki:
                 filename = next((l['filename'] for l in attachments if l['hash'] == filehash), None)
 
                 if filename is not None:
-                    # convert pdf -> jpg
-                    images = pdf2jpg(filename)
+                    # convert pdf -> image
+                    images = pdf2image(filename)
 
                     # import each jpg
                     imageTags = Tag(soup, "span")
@@ -336,6 +344,7 @@ class Controller:
         self.evernote = Evernote()
 
     def proceed(self):
+
         anki_ids = self.anki.get_cards_id_from_tag(self.ankiTag)
         anki_guids = self.anki.get_guids_from_anki_id(anki_ids)
 
@@ -397,6 +406,10 @@ class Controller:
 
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
+
+        # TODO: funktioniert das so? + loeschfunktion implementieren
+        cards_to_delete = set(anki_guids) - set(evernote_guids)
+        
         self.anki.start_editing()
         n = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
         if self.updateExistingNotes is UpdateExistingNotes.IgnoreExistingNotes:
@@ -528,42 +541,22 @@ Preferences.setupOptions = wrap(Preferences.setupOptions, setup_evernote)
 
 
 
-import sys
-import os
-from os.path import splitext
-from objc import YES, NO
-from Foundation import NSData
-from AppKit import *
 
-NSApp = NSApplication.sharedApplication()
+# ImageMagick is a requirement, convert needs to be in the path!
+# we use envoy to better handle the output (which for whatever reason is actually output to std_err)
+import envoy
 
-def pdf2jpg(pdfpath, resolution=72):
-    """I am converting all pages of a PDF file to JPG images."""
-    
-    jpgList = []
+def pdf2image(pdfpath, resolution=72):
+    #sys.stderr.write(pdfpath+"\n")
+    r = envoy.run(str('convert pdf:' +pdfpath+ ' -verbose -density 200 ' +pdfpath+ '.png'))
+    #sys.stderr.write("envoy: "+r.std_err+"\n"+r.std_out+"\n"+"convert pdf:"+pdfpath+" -verbose -density 200 "+ pdfpath+".png"+"\nEND envoy")
+    # for whatever reason, convert outputs it as error -> std_err
+    num = re.findall(pdfpath+'-[0-9]+.png', r.std_err)
+    if len(num) is 0:
+        return [(pdfpath+".png").decode('UTF-8')]
+    else:
+        return [i.decode('UTF-8') for i in num]
 
-    pdfdata = NSData.dataWithContentsOfFile_(pdfpath)
-    pdfrep = NSPDFImageRep.imageRepWithData_(pdfdata)
-    pagecount = pdfrep.pageCount()
-    for i in range(0, pagecount):
-        pdfrep.setCurrentPage_(i)
-        pdfimage = NSImage.alloc().init()
-        pdfimage.addRepresentation_(pdfrep)
-        origsize = pdfimage.size()
-        width, height = origsize
-        pdfimage.setScalesWhenResized_(YES)
-        rf = resolution / 72.0
-        pdfimage.setSize_((width*rf, height*rf))
-        tiffimg = pdfimage.TIFFRepresentation()
-        bmpimg = NSBitmapImageRep.imageRepWithData_(tiffimg)
-        data = bmpimg.representationUsingType_properties_(NSJPEGFileType, {NSImageCompressionFactor: 1.0})
-        jpgpath = "%s-%d.jpg" % (splitext(pdfpath)[0], i)
 
-        jpgList.append(jpgpath)
-        
-        if not os.path.exists(jpgpath):
-            data.writeToFile_atomically_(jpgpath, False)
-
-    return jpgList
 
 
