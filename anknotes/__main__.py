@@ -33,7 +33,7 @@ from BeautifulSoup import BeautifulSoup, Tag
 # .. itself adapted from Yomichan plugin by Alex Yatskov.
 
 PATH = os.path.dirname(os.path.abspath(__file__))
-EVERNOTE_MODEL = 'evernote_note'
+EVERNOTE_NOTETYPE_NAME = 'evernote_note'
 EVERNOTE_TEMPLATE_NAME = 'EvernoteReview'
 TITLE_FIELD_NAME = 'title'
 CONTENT_FIELD_NAME = 'content'
@@ -73,7 +73,7 @@ class Anki:
     # Add new cards
     def add_evernote_cards(self, evernote_cards, deck, tag, update=False):
         count = 0
-        model_name = EVERNOTE_MODEL
+        model_name = EVERNOTE_NOTETYPE_NAME
         for card in evernote_cards:
             anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
                                CONTENT_FIELD_NAME: card.back.decode('utf-8'),
@@ -139,32 +139,32 @@ class Anki:
     def create_note_type(self):  # adapted from the IREAD plug-in from Frank
         col = self.collection()
         mm = col.models
-        evernote_model = mm.byName(EVERNOTE_MODEL)
-        if evernote_model is None:
-            evernote_model = mm.new(EVERNOTE_MODEL)
+        evernote_notetype = mm.byName(EVERNOTE_NOTETYPE_NAME)
+        if evernote_notetype is None:
+            evernote_notetype = mm.new(EVERNOTE_NOTETYPE_NAME)
             # Field for title:
             model_field = mm.newField(TITLE_FIELD_NAME)
-            mm.addField(evernote_model, model_field)
+            mm.addField(evernote_notetype, model_field)
             # Field for text:
             text_field = mm.newField(CONTENT_FIELD_NAME)
-            mm.addField(evernote_model, text_field)
+            mm.addField(evernote_notetype, text_field)
             # Field for source:
             guid_field = mm.newField(GUID_FIELD_NAME)
             guid_field['sticky'] = True
-            mm.addField(evernote_model, guid_field)
+            mm.addField(evernote_notetype, guid_field)
             # Field for Evernote modified date:
             modified_field = mm.newField(MODIFIED_FIELD_NAME)
             modified_field['sticky'] = True
-            mm.addField(evernote_model, modified_field)
+            mm.addField(evernote_notetype, modified_field)
             # Add template
             t = mm.newTemplate(EVERNOTE_TEMPLATE_NAME)
             t['qfmt'] = "{{" + TITLE_FIELD_NAME + "}}"
             t['afmt'] = "{{" + CONTENT_FIELD_NAME + "}}"
-            mm.addTemplate(evernote_model, t)
-            mm.add(evernote_model)
-            return evernote_model
+            mm.addTemplate(evernote_notetype, t)
+            mm.add(evernote_notetype)
+            return evernote_notetype
         else:
-            fmap = mm.fieldMap(evernote_model)
+            fmap = mm.fieldMap(evernote_notetype)
             title_ord, title_field = fmap[TITLE_FIELD_NAME]
             text_ord, text_field = fmap[CONTENT_FIELD_NAME]
             source_ord, source_field = fmap[GUID_FIELD_NAME]
