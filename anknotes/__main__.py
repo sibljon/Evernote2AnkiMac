@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import os, sys, subprocess
+import os, sys, subprocess, datetime
 
 # from thrift.Thrift import *
 from evernote.edam.notestore.ttypes import NoteFilter, NotesMetadataResultSpec
@@ -37,6 +37,7 @@ EVERNOTE_MODEL = 'evernote_note'
 EVERNOTE_TEMPLATE_NAME = 'EvernoteReview'
 TITLE_FIELD_NAME = 'title'
 CONTENT_FIELD_NAME = 'content'
+MODIFIED_FIELD_NAME = 'last modified'
 GUID_FIELD_NAME = 'Evernote GUID'
 
 USE_APPLESCRIPT = False
@@ -58,25 +59,36 @@ SETTING_DEFAULT_DECK = 'evernoteDefaultDeck'
 class UpdateExistingNotes:
     IgnoreExistingNotes, UpdateNotesInPlace, DeleteAndReAddNotes = range(3)
 
-class Anki:
-    def update_evernote_cards(self, evernote_cards, tag):
-        return self.add_evernote_cards(evernote_cards, None, tag, True)
 
+# Anki-specific
+# Adding, updating, deleting notes in Anki
+class Anki:
+    
+    # Update cards
+    def update_evernote_cards(self, evernote_cards, tag):
+        # We don't provide a 'deck'; in case the user has 
+        # moved the card to another deck it stays there
+        return self.add_evernote_cards(evernote_cards, None, tag, True)
+    
+    # Add new cards
     def add_evernote_cards(self, evernote_cards, deck, tag, update=False):
         count = 0
         model_name = EVERNOTE_MODEL
         for card in evernote_cards:
             anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
                                CONTENT_FIELD_NAME: card.back.decode('utf-8'),
+                               MODIFIED_FIELD_NAME: datetime.strptime(card.modified, '%A %d %B %Y at %H:%M:%S'),
                                GUID_FIELD_NAME: card.guid}
             card.tags.append(tag)
             if update:
-                self.update_note(anki_field_info, card.tags, card.attachments)
+                self.update_card(anki_field_info, card.tags, card.attachments)
             else:
-                self.add_note(deck, model_name, anki_field_info, card.tags)
+                self.add_card(deck, model_name, anki_field_info, card.tags)
             count += 1
         return count
 
+    # TODO: desc
+    # TODO: does this work already? -> implement delete
     def delete_anki_cards(self, guid_ids):
         col = self.collection()
         card_ids = []
@@ -85,7 +97,8 @@ class Anki:
         col.remCards(card_ids)
         return len(card_ids)
 
-    def update_note(self, fields, tags=list(), attachments=None):
+    # Update a single card
+    def update_card(self, fields, tags=list(), attachments=None):
         col = self.collection()
         note_id = col.findNotes(fields[GUID_FIELD_NAME])[0]
         note = anki.notes.Note(col, None, note_id)
@@ -99,8 +112,9 @@ class Anki:
         note.flush()
         return note.id
 
-    def add_note(self, deck_name, model_name, fields, tags=list()):
-        note = self.create_note(deck_name, model_name, fields, tags)
+    # TODO: desc
+    def add_card(self, deck_name, model_name, fields, tags=list()):
+        note = self.create_card(deck_name, model_name, fields, tags)
         if note is not None:
             collection = self.collection()
             collection.addNote(note)
@@ -108,7 +122,8 @@ class Anki:
             self.start_editing()
             return note.id
 
-    def create_note(self, deck_name, model_name, fields, tags=list()):
+    # TODO: desc
+    def create_card(self, deck_name, model_name, fields, tags=list()):
         id_deck = self.decks().id(deck_name)
         model = self.models().byName(model_name)
         col = self.collection()
@@ -120,7 +135,8 @@ class Anki:
             note[name] = value
         return note
 
-    def add_evernote_model(self):  # adapted from the IREAD plug-in from Frank
+    # create Evernote note type to be used by all notes
+    def create_note_type(self):  # adapted from the IREAD plug-in from Frank
         col = self.collection()
         mm = col.models
         evernote_model = mm.byName(EVERNOTE_MODEL)
@@ -136,6 +152,10 @@ class Anki:
             guid_field = mm.newField(GUID_FIELD_NAME)
             guid_field['sticky'] = True
             mm.addField(evernote_model, guid_field)
+            # Field for Evernote modified date:
+            modified_field = mm.newField(MODIFIED_FIELD_NAME)
+            modified_field['sticky'] = True
+            mm.addField(evernote_model, modified_field)
             # Add template
             t = mm.newTemplate(EVERNOTE_TEMPLATE_NAME)
             t['qfmt'] = "{{" + TITLE_FIELD_NAME + "}}"
@@ -148,8 +168,11 @@ class Anki:
             title_ord, title_field = fmap[TITLE_FIELD_NAME]
             text_ord, text_field = fmap[CONTENT_FIELD_NAME]
             source_ord, source_field = fmap[GUID_FIELD_NAME]
+            modified_ord, modified_field = fmap[MODIFIED_FIELD_NAME]
+            #TODO: what is sticky?
             source_field['sticky'] = False
 
+    # TODO: desc
     def get_guids_from_anki_id(self, ids):
         guids = []
         for a_id in ids:
@@ -159,15 +182,17 @@ class Anki:
                 guids.append(items[2][1])  # not a very smart access
         return guids
 
+    # TODO: desc
     def can_add_note(self, deck_name, model_name, fields):
         return bool(self.create_note(deck_name, model_name, fields))
 
+    # TODO: desc
     def get_cards_id_from_tag(self, tag):
         query = "tag:" + tag
         ids = self.collection().findCards(query)
         return ids
 
-    # TODO import file to anki media library
+    # import file to anki media library
     def import_file(self, filename):
         return aqt.mw.col.media.addFile(filename)
 
@@ -178,7 +203,7 @@ class Anki:
         soup = BeautifulSoup(content)
         pattern = re.compile(r'<.*?src="\?hash=(\w+?)".*?>')
 
-        # TODO images
+        # images
         for match in soup.findAll('img'):
             #raise NameError(self,str(match))
 
@@ -192,7 +217,7 @@ class Anki:
                     match.replaceWith(Tag(soup, 'img', [('src', importedname)]))
 
 
-        # TODO pdfs
+        # pdfs
         for match in soup.findAll('embed', {"type": "evernote/x-pdf"}):
 
             filehashmatch = pattern.search(str(match))
@@ -214,15 +239,22 @@ class Anki:
                     # replace embed with <img src...> for each image
                     match.replaceWith(imageTags)
 
+        # audio
+        # video
+
         return str(soup).decode('utf-8')
 
+    # TODO: desc
     def start_editing(self):
         self.window().requireReset()
 
+    # TODO: desc
     def stop_editing(self):
         if self.collection():
             self.window().maybeReset()
 
+
+    # TODO: are these helper functions needed?
     def window(self):
         return aqt.mw
 
@@ -236,6 +268,8 @@ class Anki:
         return self.collection().decks
 
 
+
+# TODO: desc
 class EvernoteCard:
     front = ""
     back = ""
@@ -250,9 +284,11 @@ class EvernoteCard:
         self.attachments = attachments
 
 
+# TODO: desc
 class Evernote:
     def __init__(self):
 
+        # TODO: delete non Mac stuff?
         if USE_APPLESCRIPT is False:
 
             if not mw.col.conf.get(SETTING_TOKEN, False):
@@ -280,12 +316,14 @@ class Evernote:
             self.noteStore = self.client.get_note_store()
 
 
+    # TODO: desc
     def find_tag_guid(self, tag):
         list_tags = self.noteStore.listTags()
         for evernote_tag in list_tags:
             if str(evernote_tag.name).strip() == str(tag).strip():
                 return evernote_tag.guid
 
+    # TODO: desc
     def create_evernote_cards(self, guid_set):
         cards = []
         for guid in guid_set:
@@ -296,6 +334,7 @@ class Evernote:
             cards.append(EvernoteCard(title, content, guid, tags, attachments))
         return cards
 
+    # TODO: desc
     def find_notes_filter_by_tag_guids(self, guids_list):
         evernote_filter = NoteFilter()
         evernote_filter.ascending = False
@@ -340,7 +379,7 @@ class Controller:
         self.updateExistingNotes = mw.col.conf.get(SETTING_UPDATE_EXISTING_NOTES,
                                                    UpdateExistingNotes.UpdateNotesInPlace)
         self.anki = Anki()
-        self.anki.add_evernote_model()
+        self.anki.create_note_type()
         self.evernote = Evernote()
 
     def proceed(self):
@@ -392,7 +431,7 @@ class Controller:
                             set end of attachmentList to {|hash|:hash of current_attachment, |filename|:POSIX path of current_filename}
                         end repeat
                         
-                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |modified|:modified date of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
                     end repeat
                     noteList
                 end tell
@@ -428,16 +467,20 @@ class Controller:
         self.anki.stop_editing()
         self.anki.collection().autosave()
 
+    # TODO: desc
     def update_in_anki(self, guid_set, tag):
         cards = self.evernote.create_evernote_cards(guid_set)
         number = self.anki.update_evernote_cards(cards, tag)
         return number
 
+    # TODO: desc
     def import_into_anki(self, guid_set, deck, tag):
         cards = self.evernote.create_evernote_cards(guid_set)
         number = self.anki.add_evernote_cards(cards, deck, tag)
         return number
 
+    # TODO: desc
+    # TODO: needed anymore if only mac?
     def get_evernote_guids_from_tag(self, tags):
         note_guids = []
         for tag in tags:
@@ -486,6 +529,8 @@ def setup_evernote(self):
     layout.insertWidget(int(layout.count()) + 1, evernote_default_tag_label)
     layout.insertWidget(int(layout.count()) + 2, evernote_default_tag)
     evernote_default_tag.connect(evernote_default_tag, SIGNAL("editingFinished()"), update_evernote_default_tag)
+
+    # TODO: import Evernote Shortcuts/saved searches and use these as Deck names and Tags
 
     # Tags to Import
     evernote_tags_to_import_label = QLabel("Tags to Import:")
