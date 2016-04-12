@@ -33,11 +33,13 @@ from BeautifulSoup import BeautifulSoup, Tag
 # .. itself adapted from Yomichan plugin by Alex Yatskov.
 
 PATH = os.path.dirname(os.path.abspath(__file__))
-EVERNOTE_NOTETYPE_NAME = 'evernote_note'
-EVERNOTE_TEMPLATE_NAME = 'EvernoteReview'
+EVERNOTE_NOTETYPE_DEFAULT = 'EvernoteDefault'
+EVERNOTE_NOTETYPE_HIGHLIGHTS = 'EvernoteHighlights'
+EVERNOTE_TEMPLATE_DEFAULT = 'Review'
+EVERNOTE_TEMPLATE_HIGHLIGHTS = 'Highlights'
 TITLE_FIELD_NAME = 'title'
 CONTENT_FIELD_NAME = 'content'
-MODIFIED_FIELD_NAME = 'last modified'
+MODIFIED_FIELD_NAME = 'Evernote modified'
 GUID_FIELD_NAME = 'Evernote GUID'
 
 USE_APPLESCRIPT = False
@@ -73,7 +75,7 @@ class Anki:
     # Add new cards
     def add_evernote_cards(self, evernote_cards, deck, tag, update=False):
         count = 0
-        model_name = EVERNOTE_NOTETYPE_NAME
+        model_name = EVERNOTE_NOTETYPE_DEFAULT
         for card in evernote_cards:
             anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
                                CONTENT_FIELD_NAME: card.back.decode('utf-8'),
@@ -107,8 +109,8 @@ class Anki:
             if TITLE_FIELD_NAME in fld.get('name'):
                 note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
             elif CONTENT_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = self.parse_evernote_media_tags(fields[CONTENT_FIELD_NAME], attachments)
-            # we dont have to update the evernote guid because if it changes we wont find this note anyway
+                note.fields[fld.get('ord')] = self.parse_content(fields[CONTENT_FIELD_NAME], attachments)
+            # we dont have to update the evernote guid because if it changes we would not find this note anyway
         note.flush()
         return note.id
 
@@ -136,12 +138,13 @@ class Anki:
         return note
 
     # create Evernote note type to be used by all notes
-    def create_note_type(self):  # adapted from the IREAD plug-in from Frank
+    # TODO: highlight note type
+    def create_note_type_default(self):  # adapted from the IREAD plug-in from Frank
         col = self.collection()
         mm = col.models
-        evernote_notetype = mm.byName(EVERNOTE_NOTETYPE_NAME)
+        evernote_notetype = mm.byName(EVERNOTE_NOTETYPE_DEFAULT)
         if evernote_notetype is None:
-            evernote_notetype = mm.new(EVERNOTE_NOTETYPE_NAME)
+            evernote_notetype = mm.new(EVERNOTE_NOTETYPE_DEFAULT)
             # Field for title:
             model_field = mm.newField(TITLE_FIELD_NAME)
             mm.addField(evernote_notetype, model_field)
@@ -157,7 +160,7 @@ class Anki:
             modified_field['sticky'] = True
             mm.addField(evernote_notetype, modified_field)
             # Add template
-            t = mm.newTemplate(EVERNOTE_TEMPLATE_NAME)
+            t = mm.newTemplate(EVERNOTE_TEMPLATE_DEFAULT)
             t['qfmt'] = "{{" + TITLE_FIELD_NAME + "}}"
             t['afmt'] = "{{" + CONTENT_FIELD_NAME + "}}"
             mm.addTemplate(evernote_notetype, t)
@@ -167,10 +170,10 @@ class Anki:
             fmap = mm.fieldMap(evernote_notetype)
             title_ord, title_field = fmap[TITLE_FIELD_NAME]
             text_ord, text_field = fmap[CONTENT_FIELD_NAME]
-            source_ord, source_field = fmap[GUID_FIELD_NAME]
+            guid_ord, guid_field = fmap[GUID_FIELD_NAME]
             modified_ord, modified_field = fmap[MODIFIED_FIELD_NAME]
             #TODO: what is sticky?
-            source_field['sticky'] = False
+            guid_field['sticky'] = False
 
     # TODO: desc
     def get_guids_from_anki_id(self, ids):
@@ -196,8 +199,8 @@ class Anki:
     def import_file(self, filename):
         return aqt.mw.col.media.addFile(filename)
 
-    # TODO parse evernote <embed> tags
-    def parse_evernote_media_tags(self, content, attachments):
+    # TODO parse evernote content
+    def parse_content(self, content, attachments, tags):
         #raise NameError(self, content)
 
         soup = BeautifulSoup(content)
@@ -241,6 +244,22 @@ class Anki:
 
         # audio
         # video
+
+
+        #plugins
+
+        #highlights
+        # TODO: test
+        # <span style="background-color: rgb(255, 204, 102); ">some text...</span>
+        # -> <span class="highlight" style="background-color: rgb(255, 204, 102); ">some text...</span>
+        for match in soup.find(string=re.compile("<span style=\"background-color: rgb([0-9]+, [0-9]+, [0-9]+); \">.*</span>")):
+            match['class'] = match.get('class', []) + ['highlight']
+
+        # TODO: qa
+        for match in soup.find(string=re.compile("A:")):
+            match['class'] = match.get('class', []) + ['Evernote2Anki-Highlight']
+        
+
 
         return str(soup).decode('utf-8')
 
@@ -379,7 +398,7 @@ class Controller:
         self.updateExistingNotes = mw.col.conf.get(SETTING_UPDATE_EXISTING_NOTES,
                                                    UpdateExistingNotes.UpdateNotesInPlace)
         self.anki = Anki()
-        self.anki.create_note_type()
+        self.anki.create_note_type_default()
         self.evernote = Evernote()
 
     def proceed(self):
