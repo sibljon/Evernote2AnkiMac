@@ -98,7 +98,6 @@ class Anki:
         return count
 
     # TODO: desc
-    # TODO: does this work already? -> implement delete
     def delete_anki_cards(self, guid_ids):
         col = self.collection()
         card_ids = []
@@ -148,7 +147,6 @@ class Anki:
         return note
 
     # create Evernote note type to be used by all notes
-    # TODO: highlight note type
     def create_note_type_default(self):  # adapted from the IREAD plug-in from Frank
         col = self.collection()
         mm = col.models
@@ -191,8 +189,15 @@ class Anki:
         for a_id in ids:
             card = self.collection().getCard(a_id)
             items = card.note().items()
-            if len(items) == 3:
-                guids.append(items[2][1])  # not a very smart access
+            # TODO: refactor!
+            # wie komme ich sicher & zuverlässig an GUID?
+            # [(u'title', u'highlight test'),
+            #  (u'content',
+            #   u'\n<div id="en-note">\n<div>ahjfdkla jklsdfjdlsk\xf6 ajsdflk\xf6:</div>\n<ul>\n<li>jadkslf fajdklfjsl\xf6</li>\n<li>adfjkl\xf6dsfsd sdsdfsd</li>\n<li>afdsjkl\xf6sd sfdjklfsdl\xf6</li>\n<li>Frage: ANTWORT</li>\n</ul>\n<div><br /></div>\n<div>jetzt noch eine Tabelle:</div>\n<div><br /></div>\n<table style="-evernote-table:true;border-collapse:collapse;width:100%;table-layout:fixed;margin-left:0px;">\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>ffff</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">fajsdkl ajfkl\xf6sfdjl</span></div>\n</td>\n</tr>\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>fadsas fsdafjsdaf</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">fdsafas fdsdsa</span></div>\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">adfasdfd fdsfsafsa</span></div>\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">dsfasf</span></div>\n</td>\n</tr>\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>dfafaf sadfafsas</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">asdfjalk\xf6f fadsadsfas</span></div>\n</td>\n</tr>\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>afjaklf sklfadf jklf sdfjkl</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>afsfklafjkl fdskljfaslk</div>\n</td>\n</tr>\n</table>\n<div><br /></div>\n<div><br /></div>\n<div><br /></div>\n</div>\n'),
+            #  (u'Evernote GUID', u'80f8e492-fa45-4775-93e1-f70635d81cdd'),
+            #  (u'Evernote modified', u'1460502874')]
+            #  
+            guids.append(items[2][1])  # not a very smart access
         return guids
 
     # TODO: desc
@@ -211,14 +216,12 @@ class Anki:
 
     # TODO parse evernote content
     def parse_content(self, content, attachments, tags):
-        #raise NameError(self, content)
 
         soup = BeautifulSoup(content)
         pattern = re.compile(r'<.*?src="\?hash=(\w+?)".*?>')
 
         # images
         for match in soup.findAll('img'):
-            #raise NameError(self,str(match))
 
             filehashmatch = pattern.search(str(match))
             if filehashmatch:
@@ -325,7 +328,6 @@ class EvernoteCard:
 class Evernote:
     def __init__(self):
 
-        # TODO: delete non Mac stuff?
         if USE_APPLESCRIPT is False:
 
             if not mw.col.conf.get(SETTING_TOKEN, False):
@@ -482,7 +484,8 @@ class Controller:
 
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
-        
+        #sys.stderr.write(', '.join(anki_guids)+'\n\n'+', '.join(cards_to_update)+'\n\n'+', '.join(cards_to_update)+'\n')
+
         self.anki.start_editing()
         n = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
         if self.updateExistingNotes is UpdateExistingNotes.IgnoreExistingNotes:
@@ -514,7 +517,6 @@ class Controller:
         return number
 
     # TODO: desc
-    # TODO: needed anymore if only mac?
     def get_evernote_guids_from_tag(self, tags):
         note_guids = []
         for tag in tags:
