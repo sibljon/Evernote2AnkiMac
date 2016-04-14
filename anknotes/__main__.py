@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import os, sys, subprocess, datetime
+import os, sys, subprocess
+from datetime import datetime
+import time
 
 # from thrift.Thrift import *
 from evernote.edam.notestore.ttypes import NoteFilter, NotesMetadataResultSpec
@@ -76,12 +78,18 @@ class Anki:
     def add_evernote_cards(self, evernote_cards, deck, tag, update=False):
         count = 0
         model_name = EVERNOTE_NOTETYPE_DEFAULT
+
         for card in evernote_cards:
-            anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
-                               CONTENT_FIELD_NAME: card.back.decode('utf-8'),
-                               MODIFIED_FIELD_NAME: datetime.strptime(card.modified, '%A %d %B %Y at %H:%M:%S'),
-                               GUID_FIELD_NAME: card.guid}
+            #sys.stderr.write(card+"\n")
+            # seconds from epoch when this note was last modified in evernote
+            # -> so we can check with this value if it has changed since last import
+            modified_in_seconds_from_epoch = int((card.modified-datetime.utcfromtimestamp(0)).total_seconds())
             card.tags.append(tag)
+            anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
+                               CONTENT_FIELD_NAME: self.parse_content(card.back.decode('utf-8'), card.attachments, card.tags),
+                               MODIFIED_FIELD_NAME: str(modified_in_seconds_from_epoch),
+                               GUID_FIELD_NAME: card.guid}
+    
             if update:
                 self.update_card(anki_field_info, card.tags, card.attachments)
             else:
@@ -105,11 +113,14 @@ class Anki:
         note_id = col.findNotes(fields[GUID_FIELD_NAME])[0]
         note = anki.notes.Note(col, None, note_id)
         note.tags = tags
+
+        # TODO: only update when new modified value > old value
+        
         for fld in note._model['flds']:
             if TITLE_FIELD_NAME in fld.get('name'):
                 note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
             elif CONTENT_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = self.parse_content(fields[CONTENT_FIELD_NAME], attachments)
+                note.fields[fld.get('ord')] = fields[CONTENT_FIELD_NAME]
             # we dont have to update the evernote guid because if it changes we would not find this note anyway
         note.flush()
         return note.id
@@ -133,7 +144,6 @@ class Anki:
         note.model()['did'] = id_deck
         note.tags = tags
         for name, value in fields.items():
-            # TODO if field=content -> do the media magic
             note[name] = value
         return note
 
@@ -252,12 +262,18 @@ class Anki:
         # TODO: test
         # <span style="background-color: rgb(255, 204, 102); ">some text...</span>
         # -> <span class="highlight" style="background-color: rgb(255, 204, 102); ">some text...</span>
-        for match in soup.find(string=re.compile("<span style=\"background-color: rgb([0-9]+, [0-9]+, [0-9]+); \">.*</span>")):
-            match['class'] = match.get('class', []) + ['highlight']
+        # 
+        # if mw.col.conf.get(SETTING_TAG_HIGHLIGHTS, False) in tags:
+        #     matches = soup.find(string=re.compile("<span style=\"background-color: rgb([0-9]+, [0-9]+, [0-9]+); \">.*</span>"))
+        #     if matches is not None:
+        #         for match in matches:
+        #             match['class'] = match.get('class', []) + ['highlight']
+        #             
+        #             
 
         # TODO: qa
-        for match in soup.find(string=re.compile("A:")):
-            match['class'] = match.get('class', []) + ['Evernote2Anki-Highlight']
+        #for match in soup.find(string=re.compile("A:")):
+        #    match['class'] = match.get('class', []) + ['Evernote2Anki-Highlight']
         
 
 
@@ -294,13 +310,15 @@ class EvernoteCard:
     back = ""
     guid = ""
     attachments = []
+    modified = ""
 
-    def __init__(self, q, a, g, tags, attachments):
+    def __init__(self, q, a, g, tags, attachments, modified):
         self.front = q
         self.back = a
         self.guid = g
         self.tags = tags
         self.attachments = attachments
+        self.modified = modified
 
 
 # TODO: desc
@@ -349,8 +367,8 @@ class Evernote:
             note_info = self.get_note_information(guid)
             if note_info is None:
                 return cards
-            title, content, tags, attachments = note_info
-            cards.append(EvernoteCard(title, content, guid, tags, attachments))
+            title, content, tags, attachments, modified = note_info
+            cards.append(EvernoteCard(title, content, guid, tags, attachments, modified))
         return cards
 
     # TODO: desc
@@ -387,13 +405,13 @@ class Evernote:
                     return None
                 raise
         
-        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments']
+        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments'], whole_note['modified']
 
 
 class Controller:
     def __init__(self):
         self.evernoteTags = mw.col.conf.get(SETTING_TAGS_TO_IMPORT, "").split(",")
-        self.ankiTag = mw.col.conf.get(SETTING_DEFAULT_TAG, "anknotes")
+        self.ankiTag = mw.col.conf.get(SETTING_DEFAULT_TAG, "evernote")
         self.deck = mw.col.conf.get(SETTING_DEFAULT_DECK, "Default")
         self.updateExistingNotes = mw.col.conf.get(SETTING_UPDATE_EXISTING_NOTES,
                                                    UpdateExistingNotes.UpdateNotesInPlace)
@@ -450,7 +468,7 @@ class Controller:
                             set end of attachmentList to {|hash|:hash of current_attachment, |filename|:POSIX path of current_filename}
                         end repeat
                         
-                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |modified|:modified date of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |modified|:modification date of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
                     end repeat
                     noteList
                 end tell
@@ -464,9 +482,6 @@ class Controller:
 
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
-
-        # TODO: funktioniert das so? + loeschfunktion implementieren
-        cards_to_delete = set(anki_guids) - set(evernote_guids)
         
         self.anki.start_editing()
         n = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
@@ -548,8 +563,6 @@ def setup_evernote(self):
     layout.insertWidget(int(layout.count()) + 1, evernote_default_tag_label)
     layout.insertWidget(int(layout.count()) + 2, evernote_default_tag)
     evernote_default_tag.connect(evernote_default_tag, SIGNAL("editingFinished()"), update_evernote_default_tag)
-
-    # TODO: import Evernote Shortcuts/saved searches and use these as Deck names and Tags
 
     # Tags to Import
     evernote_tags_to_import_label = QLabel("Tags to Import:")
