@@ -111,7 +111,13 @@ class Anki:
         col = self.collection()
         note_id = col.findNotes(fields[GUID_FIELD_NAME])[0]
         note = anki.notes.Note(col, None, note_id)
-        note.tags = tags
+
+        # if note is marked (tag "Marked"), readd "Marked" to new tags also
+        if "Marked" in note.tags:
+            tags.append("Marked")
+            note.tags = tags
+        else:
+            note.tags = tags
 
         # TODO: only update when new modified value > old value
         
@@ -167,10 +173,54 @@ class Anki:
             modified_field = mm.newField(MODIFIED_FIELD_NAME)
             modified_field['sticky'] = True
             mm.addField(evernote_notetype, modified_field)
+            # CSS
+            evernote_notetype["css"] = """.card{}"""
+
             # Add template
             t = mm.newTemplate(EVERNOTE_TEMPLATE_DEFAULT)
-            t['qfmt'] = "{{" + TITLE_FIELD_NAME + "}}"
-            t['afmt'] = "{{" + CONTENT_FIELD_NAME + "}}"
+            
+            t['qfmt'] = """<h1>
+{{""" + TITLE_FIELD_NAME + """}}
+</h1>"""
+            
+            t['afmt'] = """{{FrontSide}}
+<hr id=answer>
+<div id="evernote2ankiHighlightsLinks" style="display: none;">
+    <a href="#" onclick="goToFirstHighlight(); return false;">Go to first highlight</a> &nbsp; 
+    <a href="" onclick="showAllHighlights(); return false;">Show all highlights</a> &nbsp; 
+    <a href="" onclick="hideAllHighlights(); return false;">Hide all highlights</a>
+</div>
+{{""" + CONTENT_FIELD_NAME + """}}
+
+<script type="text/javascript">
+        var highlights = document.querySelectorAll("[style*=-evernote-highlight]");
+        var arrayLength = highlights.length;
+        if(arrayLength>0){
+            document.getElementById("evernote2ankiHighlightsLinks").style.display = "block";
+        }
+        
+        var hideAllHighlights = function(){
+            for (var i = 0; i < arrayLength; i++) {
+                var inner = highlights[i].innerHTML;
+                highlights[i].innerHTML = "<span style='visibility:hidden'>"+inner+"</span>";
+                // add click handler to show
+                highlights[i].addEventListener("click", function() {
+                    this.innerHTML = this.firstChild.innerHTML;
+                });
+            }
+        }
+        hideAllHighlights();
+
+        var goToFirstHighlight = function() {
+            highlights[0].scrollIntoView();
+        }
+
+        var showAllHighlights = function() {
+            for (var i = 0; i < arrayLength; i++) {
+                highlights[i].innerHTML = highlights[i].firstChild.innerHTML;
+            }
+        }
+</script>"""
             mm.addTemplate(evernote_notetype, t)
             mm.add(evernote_notetype)
             return evernote_notetype
@@ -484,13 +534,22 @@ class Controller:
 
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
+        cards_to_delete = set(anki_guids) - set(evernote_guids)
         #sys.stderr.write(', '.join(anki_guids)+'\n\n'+', '.join(cards_to_update)+'\n\n'+', '.join(cards_to_update)+'\n')
 
         self.anki.start_editing()
-        n = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
+
+        # delete
+        n = len(cards_to_delete)
+        self.anki.delete_anki_cards(cards_to_delete)
+
+        #add
+        n1 = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
+        
         if self.updateExistingNotes is UpdateExistingNotes.IgnoreExistingNotes:
-            show_tooltip("{} new card(s) have been imported. Updating is disabled.".format(str(n)))
+            show_tooltip("{} new card(s) imported, {} card(s) deleted. Updating is disabled.".format(str(n1), str(n)))
         else:
+            # update
             n2 = len(cards_to_update)
             if self.updateExistingNotes is UpdateExistingNotes.UpdateNotesInPlace:
                 update_str = "in-place"
@@ -499,8 +558,9 @@ class Controller:
                 update_str = "(deleted and re-added)"
                 self.anki.delete_anki_cards(cards_to_update)
                 self.import_into_anki(cards_to_update, self.deck, self.ankiTag)
-            show_tooltip("{} new card(s) have been imported and {} existing card(s) have been updated {}."
-                         .format(str(n), str(n2), update_str))
+            show_tooltip("{} new card(s) imported, {} card(s) updated {} and {} cards deleted."
+                         .format(str(n1), str(n2), update_str, str(n)))
+
         self.anki.stop_editing()
         self.anki.collection().autosave()
 
@@ -627,7 +687,7 @@ import envoy
 
 def pdf2image(pdfpath, resolution=72):
     #sys.stderr.write(pdfpath+"\n")
-    r = envoy.run(str('convert pdf:' +pdfpath+ ' -verbose -density 200 ' +pdfpath+ '.png'))
+    r = envoy.run(str('convert -verbose -density 200 pdf:' +pdfpath+ ' ' +pdfpath+ '.png'))
     #sys.stderr.write("envoy: "+r.std_err+"\n"+r.std_out+"\n"+"convert pdf:"+pdfpath+" -verbose -density 200 "+ pdfpath+".png"+"\nEND envoy")
     # for whatever reason, convert outputs it as error -> std_err
     num = re.findall(pdfpath+'-[0-9]+.png', r.std_err)
