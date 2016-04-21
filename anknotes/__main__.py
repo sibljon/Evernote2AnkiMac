@@ -84,16 +84,18 @@ class Anki:
             # seconds from epoch when this note was last modified in evernote
             # -> so we can check with this value if it has changed since last import
             modified_in_seconds_from_epoch = int((card.modified-datetime.utcfromtimestamp(0)).total_seconds())
+
+
             card.tags.append(tag)
             anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
-                               CONTENT_FIELD_NAME: self.parse_content(card.back.decode('utf-8'), card.attachments, card.tags),
+                               CONTENT_FIELD_NAME: card.back.decode('utf-8'),
                                MODIFIED_FIELD_NAME: str(modified_in_seconds_from_epoch),
                                GUID_FIELD_NAME: card.guid}
     
             if update:
                 self.update_card(anki_field_info, card.tags, card.attachments)
             else:
-                self.add_card(deck, model_name, anki_field_info, card.tags)
+                self.add_card(deck, model_name, anki_field_info, card.tags, card.attachments)
             count += 1
         return count
 
@@ -120,19 +122,25 @@ class Anki:
             note.tags = tags
 
         # TODO: only update when new modified value > old value
-        
+        # go through all fields until modified is found
         for fld in note._model['flds']:
-            if TITLE_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
-            elif CONTENT_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = fields[CONTENT_FIELD_NAME]
-            # we dont have to update the evernote guid because if it changes we would not find this note anyway
+            if MODIFIED_FIELD_NAME in fld.get('name'):
+                if fields[MODIFIED_FIELD_NAME] > note.fields[fld.get('ord')]:
+
+                    # go through fields again and update
+                    for fld in note._model['flds']:
+                        if TITLE_FIELD_NAME in fld.get('name'):
+                            note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
+                        elif CONTENT_FIELD_NAME in fld.get('name'):
+                            note.fields[fld.get('ord')] = self.parse_content(fields[CONTENT_FIELD_NAME], attachments, tags)
+                        # we dont have to update the evernote guid because if it changes we would not find this note anyway
+                        
         note.flush()
         return note.id
 
     # TODO: desc
-    def add_card(self, deck_name, model_name, fields, tags=list()):
-        note = self.create_card(deck_name, model_name, fields, tags)
+    def add_card(self, deck_name, model_name, fields, tags=list(), attachments=None):
+        note = self.create_card(deck_name, model_name, fields, tags, attachments)
         if note is not None:
             collection = self.collection()
             collection.addNote(note)
@@ -141,13 +149,17 @@ class Anki:
             return note.id
 
     # TODO: desc
-    def create_card(self, deck_name, model_name, fields, tags=list()):
+    def create_card(self, deck_name, model_name, fields, tags=list(), attachments=None):
         id_deck = self.decks().id(deck_name)
         model = self.models().byName(model_name)
         col = self.collection()
         note = anki.notes.Note(col, model)
         note.model()['did'] = id_deck
         note.tags = tags
+
+        # parse content
+        fields[CONTENT_FIELD_NAME] = self.parse_content(fields[CONTENT_FIELD_NAME], attachments, tags)
+
         for name, value in fields.items():
             note[name] = value
         return note
