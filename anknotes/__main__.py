@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import os, sys, subprocess
+from datetime import datetime
+import time
 
 # from thrift.Thrift import *
 from evernote.edam.notestore.ttypes import NoteFilter, NotesMetadataResultSpec
@@ -33,10 +35,13 @@ from BeautifulSoup import BeautifulSoup, Tag
 # .. itself adapted from Yomichan plugin by Alex Yatskov.
 
 PATH = os.path.dirname(os.path.abspath(__file__))
-EVERNOTE_MODEL = 'evernote_note'
-EVERNOTE_TEMPLATE_NAME = 'EvernoteReview'
+EVERNOTE_NOTETYPE_DEFAULT = 'EvernoteDefault'
+EVERNOTE_NOTETYPE_HIGHLIGHTS = 'EvernoteHighlights'
+EVERNOTE_TEMPLATE_DEFAULT = 'Review'
+EVERNOTE_TEMPLATE_HIGHLIGHTS = 'Highlights'
 TITLE_FIELD_NAME = 'title'
 CONTENT_FIELD_NAME = 'content'
+MODIFIED_FIELD_NAME = 'Evernote modified'
 GUID_FIELD_NAME = 'Evernote GUID'
 
 USE_APPLESCRIPT = False
@@ -58,25 +63,43 @@ SETTING_DEFAULT_DECK = 'evernoteDefaultDeck'
 class UpdateExistingNotes:
     IgnoreExistingNotes, UpdateNotesInPlace, DeleteAndReAddNotes = range(3)
 
-class Anki:
-    def update_evernote_cards(self, evernote_cards, tag):
-        return self.add_evernote_cards(evernote_cards, None, tag, True)
 
+# Anki-specific
+# Adding, updating, deleting notes in Anki
+class Anki:
+    
+    # Update cards
+    def update_evernote_cards(self, evernote_cards, tag):
+        # We don't provide a 'deck'; in case the user has 
+        # moved the card to another deck it stays there
+        return self.add_evernote_cards(evernote_cards, None, tag, True)
+    
+    # Add new cards
     def add_evernote_cards(self, evernote_cards, deck, tag, update=False):
         count = 0
-        model_name = EVERNOTE_MODEL
+        model_name = EVERNOTE_NOTETYPE_DEFAULT
+
         for card in evernote_cards:
+            #sys.stderr.write(card+"\n")
+            # seconds from epoch when this note was last modified in evernote
+            # -> so we can check with this value if it has changed since last import
+            modified_in_seconds_from_epoch = int((card.modified-datetime.utcfromtimestamp(0)).total_seconds())
+
+
+            card.tags.append(tag)
             anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
                                CONTENT_FIELD_NAME: card.back.decode('utf-8'),
+                               MODIFIED_FIELD_NAME: str(modified_in_seconds_from_epoch),
                                GUID_FIELD_NAME: card.guid}
-            card.tags.append(tag)
+    
             if update:
-                self.update_note(anki_field_info, card.tags, card.attachments)
+                self.update_card(anki_field_info, card.tags, card.attachments)
             else:
-                self.add_note(deck, model_name, anki_field_info, card.tags)
+                self.add_card(deck, model_name, anki_field_info, card.tags, card.attachments)
             count += 1
         return count
 
+    # TODO: desc
     def delete_anki_cards(self, guid_ids):
         col = self.collection()
         card_ids = []
@@ -85,22 +108,39 @@ class Anki:
         col.remCards(card_ids)
         return len(card_ids)
 
-    def update_note(self, fields, tags=list(), attachments=None):
+    # Update a single card
+    def update_card(self, fields, tags=list(), attachments=None):
         col = self.collection()
         note_id = col.findNotes(fields[GUID_FIELD_NAME])[0]
         note = anki.notes.Note(col, None, note_id)
-        note.tags = tags
+
+        # if note is marked (tag "Marked"), readd "Marked" to new tags also
+        if "Marked" in note.tags:
+            tags.append("Marked")
+            note.tags = tags
+        else:
+            note.tags = tags
+
+        # TODO: only update when new modified value > old value
+        # go through all fields until modified is found
         for fld in note._model['flds']:
-            if TITLE_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
-            elif CONTENT_FIELD_NAME in fld.get('name'):
-                note.fields[fld.get('ord')] = self.parse_evernote_media_tags(fields[CONTENT_FIELD_NAME], attachments)
-            # we dont have to update the evernote guid because if it changes we wont find this note anyway
+            if MODIFIED_FIELD_NAME in fld.get('name'):
+                if fields[MODIFIED_FIELD_NAME] > note.fields[fld.get('ord')]:
+
+                    # go through fields again and update
+                    for fld in note._model['flds']:
+                        if TITLE_FIELD_NAME in fld.get('name'):
+                            note.fields[fld.get('ord')] = fields[TITLE_FIELD_NAME]
+                        elif CONTENT_FIELD_NAME in fld.get('name'):
+                            note.fields[fld.get('ord')] = self.parse_content(fields[CONTENT_FIELD_NAME], attachments, tags)
+                        # we dont have to update the evernote guid because if it changes we would not find this note anyway
+                        
         note.flush()
         return note.id
 
-    def add_note(self, deck_name, model_name, fields, tags=list()):
-        note = self.create_note(deck_name, model_name, fields, tags)
+    # TODO: desc
+    def add_card(self, deck_name, model_name, fields, tags=list(), attachments=None):
+        note = self.create_card(deck_name, model_name, fields, tags, attachments)
         if note is not None:
             collection = self.collection()
             collection.addNote(note)
@@ -108,79 +148,142 @@ class Anki:
             self.start_editing()
             return note.id
 
-    def create_note(self, deck_name, model_name, fields, tags=list()):
+    # TODO: desc
+    def create_card(self, deck_name, model_name, fields, tags=list(), attachments=None):
         id_deck = self.decks().id(deck_name)
         model = self.models().byName(model_name)
         col = self.collection()
         note = anki.notes.Note(col, model)
         note.model()['did'] = id_deck
         note.tags = tags
+
+        # parse content
+        fields[CONTENT_FIELD_NAME] = self.parse_content(fields[CONTENT_FIELD_NAME], attachments, tags)
+
         for name, value in fields.items():
-            # TODO if field=content -> do the media magic
             note[name] = value
         return note
 
-    def add_evernote_model(self):  # adapted from the IREAD plug-in from Frank
+    # create Evernote note type to be used by all notes
+    def create_note_type_default(self):  # adapted from the IREAD plug-in from Frank
         col = self.collection()
         mm = col.models
-        evernote_model = mm.byName(EVERNOTE_MODEL)
-        if evernote_model is None:
-            evernote_model = mm.new(EVERNOTE_MODEL)
+        evernote_notetype = mm.byName(EVERNOTE_NOTETYPE_DEFAULT)
+        if evernote_notetype is None:
+            evernote_notetype = mm.new(EVERNOTE_NOTETYPE_DEFAULT)
             # Field for title:
             model_field = mm.newField(TITLE_FIELD_NAME)
-            mm.addField(evernote_model, model_field)
+            mm.addField(evernote_notetype, model_field)
             # Field for text:
             text_field = mm.newField(CONTENT_FIELD_NAME)
-            mm.addField(evernote_model, text_field)
+            mm.addField(evernote_notetype, text_field)
             # Field for source:
             guid_field = mm.newField(GUID_FIELD_NAME)
             guid_field['sticky'] = True
-            mm.addField(evernote_model, guid_field)
+            mm.addField(evernote_notetype, guid_field)
+            # Field for Evernote modified date:
+            modified_field = mm.newField(MODIFIED_FIELD_NAME)
+            modified_field['sticky'] = True
+            mm.addField(evernote_notetype, modified_field)
+            # CSS
+            evernote_notetype["css"] = """.card{}"""
+
             # Add template
-            t = mm.newTemplate(EVERNOTE_TEMPLATE_NAME)
-            t['qfmt'] = "{{" + TITLE_FIELD_NAME + "}}"
-            t['afmt'] = "{{" + CONTENT_FIELD_NAME + "}}"
-            mm.addTemplate(evernote_model, t)
-            mm.add(evernote_model)
-            return evernote_model
+            t = mm.newTemplate(EVERNOTE_TEMPLATE_DEFAULT)
+            
+            t['qfmt'] = """<h1>
+{{""" + TITLE_FIELD_NAME + """}}
+</h1>"""
+            
+            t['afmt'] = """{{FrontSide}}
+<hr id=answer>
+<div id="evernote2ankiHighlightsLinks" style="display: none;">
+    <a href="#" onclick="goToFirstHighlight(); return false;">Go to first highlight</a> &nbsp; 
+    <a href="" onclick="showAllHighlights(); return false;">Show all highlights</a> &nbsp; 
+    <a href="" onclick="hideAllHighlights(); return false;">Hide all highlights</a>
+</div>
+{{""" + CONTENT_FIELD_NAME + """}}
+
+<script type="text/javascript">
+        var highlights = document.querySelectorAll("[style*=-evernote-highlight]");
+        var arrayLength = highlights.length;
+        if(arrayLength>0){
+            document.getElementById("evernote2ankiHighlightsLinks").style.display = "block";
+        }
+        
+        var hideAllHighlights = function(){
+            for (var i = 0; i < arrayLength; i++) {
+                var inner = highlights[i].innerHTML;
+                highlights[i].innerHTML = "<span style='visibility:hidden'>"+inner+"</span>";
+                // add click handler to show
+                highlights[i].addEventListener("click", function() {
+                    this.innerHTML = this.firstChild.innerHTML;
+                });
+            }
+        }
+        hideAllHighlights();
+
+        var goToFirstHighlight = function() {
+            highlights[0].scrollIntoView();
+        }
+
+        var showAllHighlights = function() {
+            for (var i = 0; i < arrayLength; i++) {
+                highlights[i].innerHTML = highlights[i].firstChild.innerHTML;
+            }
+        }
+</script>"""
+            mm.addTemplate(evernote_notetype, t)
+            mm.add(evernote_notetype)
+            return evernote_notetype
         else:
-            fmap = mm.fieldMap(evernote_model)
+            fmap = mm.fieldMap(evernote_notetype)
             title_ord, title_field = fmap[TITLE_FIELD_NAME]
             text_ord, text_field = fmap[CONTENT_FIELD_NAME]
-            source_ord, source_field = fmap[GUID_FIELD_NAME]
-            source_field['sticky'] = False
+            guid_ord, guid_field = fmap[GUID_FIELD_NAME]
+            modified_ord, modified_field = fmap[MODIFIED_FIELD_NAME]
+            #TODO: what is sticky?
+            guid_field['sticky'] = False
 
+    # TODO: desc
     def get_guids_from_anki_id(self, ids):
         guids = []
         for a_id in ids:
             card = self.collection().getCard(a_id)
             items = card.note().items()
-            if len(items) == 3:
-                guids.append(items[2][1])  # not a very smart access
+            # TODO: refactor!
+            # wie komme ich sicher & zuverlässig an GUID?
+            # [(u'title', u'highlight test'),
+            #  (u'content',
+            #   u'\n<div id="en-note">\n<div>ahjfdkla jklsdfjdlsk\xf6 ajsdflk\xf6:</div>\n<ul>\n<li>jadkslf fajdklfjsl\xf6</li>\n<li>adfjkl\xf6dsfsd sdsdfsd</li>\n<li>afdsjkl\xf6sd sfdjklfsdl\xf6</li>\n<li>Frage: ANTWORT</li>\n</ul>\n<div><br /></div>\n<div>jetzt noch eine Tabelle:</div>\n<div><br /></div>\n<table style="-evernote-table:true;border-collapse:collapse;width:100%;table-layout:fixed;margin-left:0px;">\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>ffff</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">fajsdkl ajfkl\xf6sfdjl</span></div>\n</td>\n</tr>\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>fadsas fsdafjsdaf</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">fdsafas fdsdsa</span></div>\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">adfasdfd fdsfsafsa</span></div>\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">dsfasf</span></div>\n</td>\n</tr>\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>dfafaf sadfafsas</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div><span style="background-color: rgb(255, 250, 165);-evernote-highlight:true;">asdfjalk\xf6f fadsadsfas</span></div>\n</td>\n</tr>\n<tr>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>afjaklf sklfadf jklf sdfjkl</div>\n</td>\n<td style="border-style:solid;border-width:1px;border-color:rgb(219,219,219);padding:10px;margin:0px;width:50%;">\n<div>afsfklafjkl fdskljfaslk</div>\n</td>\n</tr>\n</table>\n<div><br /></div>\n<div><br /></div>\n<div><br /></div>\n</div>\n'),
+            #  (u'Evernote GUID', u'80f8e492-fa45-4775-93e1-f70635d81cdd'),
+            #  (u'Evernote modified', u'1460502874')]
+            #  
+            guids.append(items[2][1])  # not a very smart access
         return guids
 
+    # TODO: desc
     def can_add_note(self, deck_name, model_name, fields):
         return bool(self.create_note(deck_name, model_name, fields))
 
+    # TODO: desc
     def get_cards_id_from_tag(self, tag):
         query = "tag:" + tag
         ids = self.collection().findCards(query)
         return ids
 
-    # TODO import file to anki media library
+    # import file to anki media library
     def import_file(self, filename):
         return aqt.mw.col.media.addFile(filename)
 
-    # TODO parse evernote <embed> tags
-    def parse_evernote_media_tags(self, content, attachments):
-        #raise NameError(self, content)
+    # TODO parse evernote content
+    def parse_content(self, content, attachments, tags):
 
         soup = BeautifulSoup(content)
         pattern = re.compile(r'<.*?src="\?hash=(\w+?)".*?>')
 
-        # TODO images
+        # images
         for match in soup.findAll('img'):
-            #raise NameError(self,str(match))
 
             filehashmatch = pattern.search(str(match))
             if filehashmatch:
@@ -192,7 +295,7 @@ class Anki:
                     match.replaceWith(Tag(soup, 'img', [('src', importedname)]))
 
 
-        # TODO pdfs
+        # pdfs
         for match in soup.findAll('embed', {"type": "evernote/x-pdf"}):
 
             filehashmatch = pattern.search(str(match))
@@ -214,15 +317,44 @@ class Anki:
                     # replace embed with <img src...> for each image
                     match.replaceWith(imageTags)
 
+        # audio
+        # video
+
+
+        #plugins
+
+        #highlights
+        # TODO: test
+        # <span style="background-color: rgb(255, 204, 102); ">some text...</span>
+        # -> <span class="highlight" style="background-color: rgb(255, 204, 102); ">some text...</span>
+        # 
+        # if mw.col.conf.get(SETTING_TAG_HIGHLIGHTS, False) in tags:
+        #     matches = soup.find(string=re.compile("<span style=\"background-color: rgb([0-9]+, [0-9]+, [0-9]+); \">.*</span>"))
+        #     if matches is not None:
+        #         for match in matches:
+        #             match['class'] = match.get('class', []) + ['highlight']
+        #             
+        #             
+
+        # TODO: qa
+        #for match in soup.find(string=re.compile("A:")):
+        #    match['class'] = match.get('class', []) + ['Evernote2Anki-Highlight']
+        
+
+
         return str(soup).decode('utf-8')
 
+    # TODO: desc
     def start_editing(self):
         self.window().requireReset()
 
+    # TODO: desc
     def stop_editing(self):
         if self.collection():
             self.window().maybeReset()
 
+
+    # TODO: are these helper functions needed?
     def window(self):
         return aqt.mw
 
@@ -236,20 +368,25 @@ class Anki:
         return self.collection().decks
 
 
+
+# TODO: desc
 class EvernoteCard:
     front = ""
     back = ""
     guid = ""
     attachments = []
+    modified = ""
 
-    def __init__(self, q, a, g, tags, attachments):
+    def __init__(self, q, a, g, tags, attachments, modified):
         self.front = q
         self.back = a
         self.guid = g
         self.tags = tags
         self.attachments = attachments
+        self.modified = modified
 
 
+# TODO: desc
 class Evernote:
     def __init__(self):
 
@@ -280,22 +417,25 @@ class Evernote:
             self.noteStore = self.client.get_note_store()
 
 
+    # TODO: desc
     def find_tag_guid(self, tag):
         list_tags = self.noteStore.listTags()
         for evernote_tag in list_tags:
             if str(evernote_tag.name).strip() == str(tag).strip():
                 return evernote_tag.guid
 
+    # TODO: desc
     def create_evernote_cards(self, guid_set):
         cards = []
         for guid in guid_set:
             note_info = self.get_note_information(guid)
             if note_info is None:
                 return cards
-            title, content, tags, attachments = note_info
-            cards.append(EvernoteCard(title, content, guid, tags, attachments))
+            title, content, tags, attachments, modified = note_info
+            cards.append(EvernoteCard(title, content, guid, tags, attachments, modified))
         return cards
 
+    # TODO: desc
     def find_notes_filter_by_tag_guids(self, guids_list):
         evernote_filter = NoteFilter()
         evernote_filter.ascending = False
@@ -329,18 +469,18 @@ class Evernote:
                     return None
                 raise
         
-        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments']
+        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments'], whole_note['modified']
 
 
 class Controller:
     def __init__(self):
         self.evernoteTags = mw.col.conf.get(SETTING_TAGS_TO_IMPORT, "").split(",")
-        self.ankiTag = mw.col.conf.get(SETTING_DEFAULT_TAG, "anknotes")
+        self.ankiTag = mw.col.conf.get(SETTING_DEFAULT_TAG, "evernote")
         self.deck = mw.col.conf.get(SETTING_DEFAULT_DECK, "Default")
         self.updateExistingNotes = mw.col.conf.get(SETTING_UPDATE_EXISTING_NOTES,
                                                    UpdateExistingNotes.UpdateNotesInPlace)
         self.anki = Anki()
-        self.anki.add_evernote_model()
+        self.anki.create_note_type_default()
         self.evernote = Evernote()
 
     def proceed(self):
@@ -392,7 +532,7 @@ class Controller:
                             set end of attachmentList to {|hash|:hash of current_attachment, |filename|:POSIX path of current_filename}
                         end repeat
                         
-                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |modified|:modification date of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
                     end repeat
                     noteList
                 end tell
@@ -406,15 +546,22 @@ class Controller:
 
         cards_to_add = set(evernote_guids) - set(anki_guids)
         cards_to_update = set(evernote_guids) - set(cards_to_add)
-
-        # TODO: funktioniert das so? + loeschfunktion implementieren
         cards_to_delete = set(anki_guids) - set(evernote_guids)
-        
+        #sys.stderr.write(', '.join(anki_guids)+'\n\n'+', '.join(cards_to_update)+'\n\n'+', '.join(cards_to_update)+'\n')
+
         self.anki.start_editing()
-        n = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
+
+        # delete
+        n = len(cards_to_delete)
+        self.anki.delete_anki_cards(cards_to_delete)
+
+        #add
+        n1 = self.import_into_anki(cards_to_add, self.deck, self.ankiTag)
+        
         if self.updateExistingNotes is UpdateExistingNotes.IgnoreExistingNotes:
-            show_tooltip("{} new card(s) have been imported. Updating is disabled.".format(str(n)))
+            show_tooltip("{} new card(s) imported, {} card(s) deleted. Updating is disabled.".format(str(n1), str(n)))
         else:
+            # update
             n2 = len(cards_to_update)
             if self.updateExistingNotes is UpdateExistingNotes.UpdateNotesInPlace:
                 update_str = "in-place"
@@ -423,21 +570,25 @@ class Controller:
                 update_str = "(deleted and re-added)"
                 self.anki.delete_anki_cards(cards_to_update)
                 self.import_into_anki(cards_to_update, self.deck, self.ankiTag)
-            show_tooltip("{} new card(s) have been imported and {} existing card(s) have been updated {}."
-                         .format(str(n), str(n2), update_str))
+            show_tooltip("{} new card(s) imported, {} card(s) updated {} and {} cards deleted."
+                         .format(str(n1), str(n2), update_str, str(n)))
+
         self.anki.stop_editing()
         self.anki.collection().autosave()
 
+    # TODO: desc
     def update_in_anki(self, guid_set, tag):
         cards = self.evernote.create_evernote_cards(guid_set)
         number = self.anki.update_evernote_cards(cards, tag)
         return number
 
+    # TODO: desc
     def import_into_anki(self, guid_set, deck, tag):
         cards = self.evernote.create_evernote_cards(guid_set)
         number = self.anki.add_evernote_cards(cards, deck, tag)
         return number
 
+    # TODO: desc
     def get_evernote_guids_from_tag(self, tags):
         note_guids = []
         for tag in tags:
@@ -548,7 +699,7 @@ import envoy
 
 def pdf2image(pdfpath, resolution=72):
     #sys.stderr.write(pdfpath+"\n")
-    r = envoy.run(str('convert pdf:' +pdfpath+ ' -verbose -density 200 ' +pdfpath+ '.png'))
+    r = envoy.run(str('convert -verbose -density 200 pdf:' +pdfpath+ ' ' +pdfpath+ '.png'))
     #sys.stderr.write("envoy: "+r.std_err+"\n"+r.std_out+"\n"+"convert pdf:"+pdfpath+" -verbose -density 200 "+ pdfpath+".png"+"\nEND envoy")
     # for whatever reason, convert outputs it as error -> std_err
     num = re.findall(pdfpath+'-[0-9]+.png', r.std_err)
