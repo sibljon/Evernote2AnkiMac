@@ -88,7 +88,7 @@ class Anki:
 
             card.tags.append(tag)
             anki_field_info = {TITLE_FIELD_NAME: card.front.decode('utf-8'),
-                               CONTENT_FIELD_NAME: card.back.decode('utf-8'),
+                               CONTENT_FIELD_NAME: '<a href="'+card.link+'">' + 'View/Edit in Evernote' + '</a>\n\n' + card.back.decode('utf-8'),
                                MODIFIED_FIELD_NAME: str(modified_in_seconds_from_epoch),
                                GUID_FIELD_NAME: card.guid}
     
@@ -339,7 +339,7 @@ class Anki:
         # TODO: qa
         #for match in soup.find(string=re.compile("A:")):
         #    match['class'] = match.get('class', []) + ['Evernote2Anki-Highlight']
-        
+
 
 
         return str(soup).decode('utf-8')
@@ -374,13 +374,15 @@ class EvernoteCard:
     front = ""
     back = ""
     guid = ""
+    link = ""
     attachments = []
     modified = ""
 
-    def __init__(self, q, a, g, tags, attachments, modified):
+    def __init__(self, q, a, g, l, tags, attachments, modified):
         self.front = q
         self.back = a
         self.guid = g
+        self.link = l
         self.tags = tags
         self.attachments = attachments
         self.modified = modified
@@ -431,8 +433,8 @@ class Evernote:
             note_info = self.get_note_information(guid)
             if note_info is None:
                 return cards
-            title, content, tags, attachments, modified = note_info
-            cards.append(EvernoteCard(title, content, guid, tags, attachments, modified))
+            title, content, link, tags, attachments, modified = note_info
+            cards.append(EvernoteCard(title, content, guid, link, tags, attachments, modified))
         return cards
 
     # TODO: desc
@@ -451,6 +453,7 @@ class Evernote:
     def get_note_information(self, note_guid):
         if USE_APPLESCRIPT is not False:
             whole_note = next((l for l in USE_APPLESCRIPT['notes'] if l['guid'] == note_guid), None)
+            link = whole_note['link']
             if mw.col.conf.get(SETTING_KEEP_TAGS, False):
                 tags = whole_note['tags']
             #raise NameError(whole_note)
@@ -469,7 +472,8 @@ class Evernote:
                     return None
                 raise
         
-        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), tags, whole_note['attachments'], whole_note['modified']
+
+        return whole_note['title'].encode('utf-8'), whole_note['content'].encode('utf-8'), link, tags, whole_note['attachments'], whole_note['modified']
 
 
 class Controller:
@@ -532,7 +536,8 @@ class Controller:
                             set end of attachmentList to {|hash|:hash of current_attachment, |filename|:POSIX path of current_filename}
                         end repeat
                         
-                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |modified|:modification date of current_note, |guid|:currentGUID, |tags|:tagList, |attachments|:attachmentList}
+
+                        set end of noteList to {|title|:title of current_note, |content|:HTML content of current_note, |modified|:modification date of current_note, |guid|:currentGUID, |link|:note link of current_note, |tags|:tagList, |attachments|:attachmentList}
                     end repeat
                     noteList
                 end tell
