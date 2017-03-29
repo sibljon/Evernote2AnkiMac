@@ -13,7 +13,8 @@ Honestly, I'm not even sure what exactly this thing does. Here's what I've used 
 
 # Limitations
 
-Multi-page PDFs cause the import to fail, but single-page PDFs 
+1. Multi-page PDFs cause the import to fail, but single-page PDFs 
+2. Since the addon's goal is to sync with Evernote, it deletes notes from Anki that are no longer present in Evernote (or no longer tagged with the tag you specify). Thus, if you use Anki Desktop on two machines, and you run the import before Evernote syncs, the Evernote2AnkiMac addon will delete the Anki note. You can automatically regenerate those notes by syncing Evernote and re-running the Evernote2AnkiMac import, but you will have lost the history of those notes.
 
 # Installation (Mac)
 
